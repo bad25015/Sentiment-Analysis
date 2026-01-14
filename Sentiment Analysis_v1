@@ -1,0 +1,240 @@
+# Εγκατάσταση και Προετοιμασία Βιβλιοθηκών
+import nltk
+!pip install transformers scipy torch openpyxl -q
+!pip install --upgrade transformers accelerate
+nltk.download('punkt')
+nltk.download('stopwords')
+
+!pip uninstall -y transformers accelerate
+!pip install transformers accelerate
+
+import pandas as pd
+import torch
+from transformers import pipeline
+from google.colab import drive
+import matplotlib.pyplot as plt
+import seaborn as sns
+from nltk.corpus import stopwords
+from nltk.tokenize import word_tokenize
+import collections
+import re
+from nltk.util import ngrams
+from transformers import pipeline, AutoModelForSequenceClassification, AutoTokenizer
+import shap
+
+# Σύνδεση με το Google Drive
+drive.mount('/content/drive')
+
+# Φόρτωση μοντέλου (Multilingual BERT)
+print("Φόρτωση του AI μοντέλου (BERT Multilingual)...")
+classifier = pipeline(
+    "sentiment-analysis",
+    model="nlptown/bert-base-multilingual-uncased-sentiment"
+)
+
+file_path = "/content/drive/MyDrive/Shopping Mall Reviews.xlsx"
+
+try:
+    df = pd.read_excel(file_path)
+    df['Title'] = df['Title'].fillna('')
+    df['Description'] = df['Description'].fillna('')
+    df['Full_Review'] = (df['Title'] + " " + df['Description']).str.slice(0, 510)
+
+    # Sentiment Analysis
+    print("Ανάλυση Συναισθήματος...")
+    df['Sentiment'] = df['Full_Review'].apply(lambda x: "Positive" if int(classifier(str(x))[0]['label'].split()[0]) >= 4 else "Negative")
+
+    # Advanced Text Mining (Bigrams/Trigrams)
+    print("Εξαγωγή N-grams από τις αρνητικές κριτικές...")
+
+    # Προσαρμογή Stopwords:
+    greek_stops = set(nltk.corpus.stopwords.words('greek'))
+    english_stops = set(nltk.corpus.stopwords.words('english'))
+    negation_words = {'δεν', 'μην', 'όχι', 'οχι', 'no', 'not', 'never', 'neither', 'nor', 'without'}
+
+    final_stops = (greek_stops | english_stops) - negation_words
+    # Προσθήκη ουδέτερων λέξεων που "θολώνουν" το αποτέλεσμα
+    final_stops.update(['mall', 'center', 'cevahir', 'istanbul', 'κέντρο', 'εμπορικό', 'πολύ', 'ήταν'])
+
+    def get_ngrams(text_list, n):
+        n_grams_list = []
+        for text in text_list:
+            # Καθαρισμός στίξης αλλά διατήρηση λέξεων
+            words = re.findall(r'\b\w+\b', text.lower())
+            # Φιλτράρισμα stopwords (εκτός αρνήσεων)
+            filtered = [w for w in words if w not in final_stops and len(w) > 2]
+
+            # Δημιουργία N-grams
+            grams = ngrams(filtered, n)
+            n_grams_list.extend([' '.join(g) for g in grams])
+        return n_grams_list
+
+    # Εστίαση στις Αρνητικές Κριτικές
+    negative_texts = df[df['Sentiment'] == "Negative"]['Full_Review']
+
+    # Παίρνουμε Bigrams (n=2) και Trigrams (n=3)
+    bigrams = get_ngrams(negative_texts, 2)
+    trigrams = get_ngrams(negative_texts, 3)
+
+    top_bigrams = collections.Counter(bigrams).most_common(10)
+    top_trigrams = collections.Counter(trigrams).most_common(10)
+
+    # Οπτικοποίηση
+    plt.figure(figsize=(15, 8))
+
+    # Bigrams Plot
+    plt.subplot(1, 2, 1)
+    bg_df = pd.DataFrame(top_bigrams, columns=['Phrase', 'Count'])
+    sns.barplot(x='Count', y='Phrase', data=bg_df, palette='OrRd_r')
+    plt.title('Top 10 Negative Bigrams (2 λέξεις)')
+
+    # Trigrams Plot
+    plt.subplot(1, 2, 2)
+    tg_df = pd.DataFrame(top_trigrams, columns=['Phrase', 'Count'])
+    sns.barplot(x='Count', y='Phrase', data=tg_df, palette='Reds_r')
+    plt.title('Top 10 Negative Trigrams (3 λέξεις)')
+
+    plt.tight_layout()
+    plt.show()
+
+    print("\n--- TOP NEGATIVE PHRASES ---")
+    for phrase, count in top_bigrams:
+        print(f"Phrase: {phrase} | Count: {count}")
+
+except Exception as e:
+    print(f"Σφάλμα: {e}")
+
+count_expensive = df['Description'].str.contains('expensive', case=False, na=False).sum()
+print(count_expensive)
+
+count_parking = df['Description'].str.contains('parking', case=False, na=False).sum()
+print(count_parking)
+
+try:
+    df = pd.read_excel(file_path)
+    # Συνδυασμός Title και Description για πλήρες κείμενο
+    df['Full_Review'] = (df['Title'].fillna('') + " " + df['Description'].fillna('')).str.slice(0, 510)
+
+    # Sentiment Analysis (Binary: Positive/Negative)
+    print("Βήμα 1: Διαχωρισμός Θετικών και Αρνητικών κριτικών...")
+    def get_sentiment(text):
+        if not str(text).strip(): return "Negative"
+        res = classifier(str(text))[0]
+        stars = int(res['label'].split()[0])
+        return "Positive" if stars >= 4 else "Negative"
+
+    df['Sentiment'] = df['Full_Review'].apply(get_sentiment)
+
+    # Extraction of Negative N-grams
+    print("Βήμα 2: Εντοπισμός των λόγων δυσαρέσκειας...")
+
+    # Ρύθμιση Stopwords
+    gr_stops = set(nltk.corpus.stopwords.words('greek'))
+    en_stops = set(nltk.corpus.stopwords.words('english'))
+    negations = {'not', 'no', 'δεν', 'μην', 'οχι', 'όχι', 'without', 'never', 'poor', 'bad'}
+    all_stops = (gr_stops | en_stops) - negations
+    all_stops.update(['mall', 'cevahir', 'κέντρο', 'εμπορικό', 'center', 'πολύ', 'ήταν', 'από', 'για'])
+
+    def clean_and_ngram(texts, n):
+        words_list = []
+        for t in texts:
+            # Καθαρισμός στίξης, διατήρηση μόνο λέξεων
+            w = re.findall(r'\b\w+\b', t.lower())
+            filtered = [word for word in w if word not in all_stops and len(word) > 2]
+            grams = ngrams(filtered, n)
+            words_list.extend([' '.join(g) for g in grams])
+        return words_list
+
+    # Παίρνουμε μόνο τις Αρνητικές
+    neg_reviews = df[df['Sentiment'] == "Negative"]['Full_Review']
+
+    # Παραγωγή Bigrams (2 λέξεις) και Trigrams (3 λέξεις)
+    neg_bigrams = clean_and_ngram(neg_reviews, 2)
+    neg_trigrams = clean_and_ngram(neg_reviews, 3)
+
+    top_reasons = collections.Counter(neg_bigrams).most_common(12)
+
+    # Οπτικοποίηση: Top 12 Reasons for Low Ratings
+    plt.figure(figsize=(12, 8))
+    reasons_df = pd.DataFrame(top_reasons, columns=['Reason', 'Frequency'])
+
+    sns.barplot(x='Frequency', y='Reason', data=reasons_df, palette='Reds_r')
+    plt.title('Top 12 Λόγοι για Χαμηλή Βαθμολογία (Negative Reasons)', fontsize=16)
+    plt.xlabel('Αριθμός Αναφορών', fontsize=12)
+    plt.ylabel('Θέμα / Φράση', fontsize=12)
+    plt.grid(axis='x', linestyle='--', alpha=0.7)
+    plt.show()
+
+    # Τελική Αναφορά & Αποθήκευση
+    print("\n--- ΣΥΝΟΨΗ ΠΡΟΒΛΗΜΑΤΩΝ (Top Negative Themes) ---")
+    for r, count in top_reasons:
+        print(f"{r.upper()} (Αναφέρθηκε {count} φορές)")
+
+    output_path = "/content/drive/MyDrive/Negative_Analysis_Report.xlsx"
+    df.to_excel(output_path, index=False)
+    print(f"\nΗ ανάλυση σώθηκε στο Drive: {output_path}")
+
+except Exception as e:
+    print(f"Σφάλμα: {e}")
+
+# Κρατάμε τις αρνητικές για την ανάλυση (π.χ. Rating <= 2)
+neg_reviews = df[df['Rating'] <= 2]['Description'].fillna('').astype(str).tolist()
+
+# Φόρτωση Μοντέλου και Tokenizer
+model_name = "nlptown/bert-base-multilingual-uncased-sentiment"
+model = AutoModelForSequenceClassification.from_pretrained(model_name)
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+# Δημιουργία pipeline για το SHAP
+pred_pipeline = pipeline("sentiment-analysis", model=model, tokenizer=tokenizer, return_all_scores=True)
+
+# Εφαρμογή SHAP
+# Ορίζουμε μια συνάρτηση πρόβλεψης που δέχεται κείμενο και επιστρέφει scores
+def f(x):
+    tv = [pred_pipeline(val) for val in x]
+    # Επιστρέφουμε το score για το "1 star" (πολύ αρνητικό)
+    return [res[0]['score'] for res in tv]
+
+# Χρησιμοποιούμε τον Explainer για κείμενο
+explainer = shap.Explainer(pred_pipeline)
+
+# Παίρνουμε ένα δείγμα από τις αρνητικές κριτικές (τις πρώτες 5)
+shap_values = explainer(neg_reviews[:5])
+
+# Οπτικοποίηση
+# Ποιες λέξεις (π.χ. "crowded", "dirty", "expensive") ανέβασαν το αρνητικό score
+shap.plots.text(shap_values)
+
+from sentence_transformers import SentenceTransformer
+
+from sklearn.cluster import KMeans
+# Φόρτωση Μοντέλου που "καταλαβαίνει" νοήματα προτάσεων
+model = SentenceTransformer('all-MiniLM-L6-v2')
+
+# Φιλτράρισμα μόνο των πραγματικά αρνητικών (π.χ. Rating 1 & 2)
+neg_df = df[df['Rating'] <= 2].copy()
+sentences = neg_df['Description'].fillna('').tolist()
+
+# Μετατροπή προτάσεων σε διανύσματα (Embeddings)
+embeddings = model.encode(sentences)
+
+# Ομαδοποίηση σε 3-4 κύρια Marketing "Pain Points"
+num_clusters = 4
+kmeans = KMeans(n_clusters=num_clusters, random_state=42)
+neg_df['Cluster'] = kmeans.fit_predict(embeddings)
+
+# Εύρεση της "Αντιπροσωπευτικής Κριτικής" για κάθε Cluster
+print("--- MARKETING INSIGHTS PER CLUSTER ---")
+for i in range(num_clusters):
+    cluster_samples = neg_df[neg_df['Cluster'] == i]['Description'].iloc[:2].values
+    print(f"\n📢 GROUP {i+1} (Pain Point):")
+    for sample in cluster_samples:
+        print(f" - {sample[:150]}...")
+
+# Οπτικοποίηση για την εργασία
+plt.figure(figsize=(10, 6))
+sns.countplot(x='Cluster', data=neg_df, palette='viridis')
+plt.title('Κατανομή Παραπόνων ανά Θεματική Ενότητα', fontsize=14)
+plt.xlabel('Cluster Προβλήματος')
+plt.ylabel('Αριθμός Κριτικών')
+plt.show()
