@@ -1,0 +1,145 @@
+!pip install --upgrade transformers accelerate sentence-transformers shap -q
+
+import nltk
+nltk.download('punkt')
+nltk.download('punkt_tab')
+nltk.download('stopwords')
+
+import pandas as pd
+import numpy as np
+import torch
+import re
+import matplotlib.pyplot as plt
+import seaborn as sns
+from google.colab import drive
+from transformers import pipeline, AutoModelForSequenceClassification, AutoTokenizer
+import shap
+from sentence_transformers import SentenceTransformer
+from sklearn.cluster import KMeans
+from nltk.corpus import stopwords
+from nltk.util import ngrams
+from collections import Counter
+
+# Σύνδεση με Google Drive
+drive.mount('/content/drive')
+file_path = "/content/drive/MyDrive/Shopping Mall Reviews.xlsx"
+df = pd.read_excel(file_path)
+
+# Φόρτωση Deep Learning Μοντέλων
+print("Φόρτωση BERT & Sentence-Transformers...")
+model_name = "nlptown/bert-base-multilingual-uncased-sentiment"
+sentiment_pipeline = pipeline("sentiment-analysis", model=model_name, device=device)
+embedder = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
+
+# Διατήρηση αρνήσεων για σωστό Sentiment
+greek_stops = set(stopwords.words('greek'))
+english_stops = set(stopwords.words('english'))
+negations = {'no', 'not', 'never', 'without', 'neither', 'nor'}
+final_stops = (english_stops) - negations
+final_stops = (greek_stops | english_stops) - negations
+final_stops.update(['mall', 'center', 'istanbul', 'κέντρο', 'εμπορικό', 'πολύ', 'ήταν'])
+
+def get_clean_tokens(text):
+    text = str(text).lower()
+    text = re.sub(r'[^\w\s]', '', text)
+    tokens = nltk.word_tokenize(text)
+    return [w for w in tokens if w not in final_stops and len(w) > 2]
+
+df['Tokens'] = (df['Title'].fillna('') + " " + df['Description'].fillna('')).apply(get_clean_tokens)
+df['Model_Input'] = df['Tokens'].apply(lambda x: " ".join(x)[:510])
+
+# Deep Learning Sentiment Analysis
+print("Ανάλυση Συναισθήματος (BERT)...")
+results = sentiment_pipeline(df['Model_Input'].tolist())
+
+# Μετατροπή των 1-5 σε Λεκτικές Κατηγορίες (Mapping)
+sentiment_map = {
+    1: "Πολύ Αρνητικό (Κρίσιμο)",
+    2: "Αρνητικό",
+    3: "Ουδέτερο",
+    4: "Θετικό",
+    5: "Εξαιρετικό (Loyalty)"
+}
+df['Stars'] = [int(res['label'].split()[0]) for res in results]
+df['Sentiment_Label'] = df['Stars'].map(sentiment_map)
+
+# Εξαγωγή N-grams από τις Αρνητικές Κριτικές (Stars 1-2)
+neg_reviews_tokens = df[df['Stars'] <= 2]['Tokens']
+def generate_ngrams(tokens_list, n):
+    n_grams = []
+    for tokens in tokens_list:
+        n_grams.extend([' '.join(g) for g in ngrams(tokens, n)])
+    return n_grams
+
+bigrams = generate_ngrams(neg_reviews_tokens, 2)
+trigrams = generate_ngrams(neg_reviews_tokens, 3)
+
+top_bigrams = Counter(bigrams).most_common(10)
+top_trigrams = Counter(trigrams).most_common(10)
+
+# Semantic Clustering & Topic Extraction (Τι λένε οι πελάτες;)
+print("Ομαδοποίηση Παραπόνων (Semantic Clustering)...")
+neg_df = df[df['Stars'] <= 2].copy()
+if not neg_df.empty:
+    embeddings = embedder.encode(neg_df['Model_Input'].tolist())
+    kmeans = KMeans(n_clusters=3, random_state=42)
+    neg_df['Cluster'] = kmeans.fit_predict(embeddings)
+
+    # Εύρεση λέξεων-κλειδιών ανά Cluster για επεξήγηση
+    cluster_summaries = {}
+    for i in range(3):
+        text_data = " ".join(neg_df[neg_df['Cluster'] == i]['Clean_Text'])
+        words = nltk.tokenize.word_tokenize(text_data)
+        fdist = nltk.FreqDist(words)
+        cluster_summaries[i] = ", ".join([w for w, f in fdist.most_common(5)])
+
+# ΚΑΤΑΝΟΗΤΕΣ ΟΠΤΙΚΟΠΟΙΗΣΕΙΣ
+plt.figure(figsize=(18, 12))
+
+# Γράφημα 1: Top 10 Αρνητικά Bigrams (Συνδυασμοί 2 λέξεων)
+plt.subplot(2, 1, 1)
+bg_df = pd.DataFrame(top_bigrams, columns=['Φράση', 'Συχνότητα'])
+sns.barplot(x='Συχνότητα', y='Φράση', data=bg_df, palette='Reds_r')
+plt.title('Κυριότεροι Συνδυασμοί 2 Λέξεων σε Αρνητικές Κριτικές (Bigrams)', fontsize=15)
+
+# Γράφημα 2: Top 10 Αρνητικά Trigrams (Συνδυασμοί 3 λέξεων)
+plt.subplot(2, 1, 2)
+tg_df = pd.DataFrame(top_trigrams, columns=['Φράση', 'Συχνότητα'])
+sns.barplot(x='Συχνότητα', y='Φράση', data=tg_df, palette='Oranges_r')
+plt.title('Κυριότεροι Συνδυασμοί 3 Λέξεων σε Αρνητικές Κριτικές (Trigrams)', fontsize=15)
+
+plt.tight_layout()
+plt.show()
+
+# ΝΕΕΣ & ΚΑΤΑΝΟΗΤΕΣ ΟΠΤΙΚΟΠΟΙΗΣΕΙΣ
+plt.figure(figsize=(20, 14))
+
+# Γράφημα 1: Ποσοστιαία Κατανομή Συναισθήματος (Donut Chart)
+plt.subplot(2, 2, 1)
+sentiment_counts = df['Sentiment_Label'].value_counts()
+plt.pie(sentiment_counts, labels=sentiment_counts.index, autopct='%1.1f%%',
+        startangle=140, colors=sns.color_palette("RdYlGn", len(sentiment_counts)))
+plt.title('Γενική Εικόνα Ικανοποίησης Πελατών (BERT Output)', fontsize=15)
+
+# Γράφημα 2: Τα 10 Κυριότερα Προβλήματα (Top Negative Keywords)
+plt.subplot(2, 2, 2)
+all_neg_text = " ".join(neg_df['Clean_Text'])
+neg_words = nltk.tokenize.word_tokenize(all_neg_text)
+neg_fdist = pd.Series(neg_words).value_counts()[:12]
+sns.barplot(x=neg_fdist.values, y=neg_fdist.index, palette='Reds_r')
+plt.title('Κυριότερες Λέξεις σε Αρνητικές Κριτικές (Pain Points)', fontsize=15)
+
+# Γράφημα 3: Ανάλυση Θεματικών Ενοτήτων Παραπόνων
+plt.subplot(2, 2, 3)
+cluster_counts = neg_df['Cluster'].value_counts().sort_index()
+cluster_labels = [f"Ομάδα {i+1}:\n({cluster_summaries[i]})" for i in range(3)]
+sns.barplot(x=cluster_counts.values, y=cluster_labels, palette='magma')
+plt.title('Θεματική Ομαδοποίηση Παραπόνων (Semantic Clusters)', fontsize=15)
+
+plt.tight_layout()
+plt.show()
+
+# 8. Explainability (SHAP) - Εξήγηση συγκεκριμένης κριτικής
+explainer = shap.Explainer(sentiment_pipeline)
+shap_values = explainer(df['Model_Input'].iloc[:1].tolist())
+shap.plots.text(shap_values[0])
